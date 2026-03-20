@@ -1,20 +1,23 @@
 import discord
 from discord.ext import commands, tasks
-from discord import app_commands
 import os, json, random, asyncio
 from datetime import datetime
+from dotenv import load_dotenv
 
 # ---------------------
 # CONFIG
 # ---------------------
+load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
+if not TOKEN:
+    raise ValueError("⚠️ Discord token not found! Set DISCORD_TOKEN in environment variables or .env file.")
 
 REVIEW_CHANNEL = "✿﹒⤷﹒﹒﹒reviews"
 ANNOUNCE_CHANNEL = "—﹒⩇⩇﹒announce"
 PING_ROLE_ID = 1474602306149290187
-
 REVIEW_COOLDOWN = 20
 
+# COLORS
 SOFT = 0xF8E1E7
 CREAM = 0xFFF6F0
 GOLD = 0xFFD700
@@ -26,10 +29,11 @@ DATA_FILE = "reviews_archive.json"
 # ---------------------
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ---------------------
-# DATA
+# LOAD DATA
 # ---------------------
 if os.path.exists(DATA_FILE):
     with open(DATA_FILE, "r") as f:
@@ -41,7 +45,7 @@ review_counter = len(data["reviews"])
 cooldowns = {}
 
 # ---------------------
-# UTIL
+# UTILS
 # ---------------------
 def save():
     with open(DATA_FILE, "w") as f:
@@ -58,11 +62,12 @@ def chef_stats(cid):
     return data["chefs"].get(str(cid), {
         "total_reviews": 0,
         "average_rating": 0,
-        "reputation": "N/A"
+        "reputation": "N/A",
+        "announced": False
     })
 
 def update_chef(cid, rating):
-    c = data["chefs"].get(str(cid), {"total_reviews":0,"sum":0})
+    c = data["chefs"].get(str(cid), {"total_reviews":0,"sum":0, "announced": False})
     c["total_reviews"] += 1
     c["sum"] += rating
     c["average_rating"] = round(c["sum"]/c["total_reviews"],2)
@@ -73,7 +78,6 @@ def update_chef(cid, rating):
 def update_streak(uid):
     today = datetime.utcnow().date()
     u = data["users"].get(str(uid), {"last":None,"streak":0})
-
     if u["last"]:
         last = datetime.fromisoformat(u["last"]).date()
         if (today - last).days == 1:
@@ -82,7 +86,6 @@ def update_streak(uid):
             u["streak"] = 1
     else:
         u["streak"] = 1
-
     u["last"] = datetime.utcnow().isoformat()
     data["users"][str(uid)] = u
     return u
@@ -97,7 +100,7 @@ def parse_rating(msg):
     return 5
 
 # ---------------------
-# ANNOUNCEMENT
+# ANNOUNCEMENTS
 # ---------------------
 async def announce(guild, member, stats):
     ch = discord.utils.get(guild.text_channels, name=ANNOUNCE_CHANNEL)
@@ -105,7 +108,7 @@ async def announce(guild, member, stats):
     if not ch:
         return
 
-    # buildup
+    # buildup animation
     for line in [
         "** **",
         "ㅤsomething is shifting within the vault…",
@@ -131,32 +134,33 @@ async def announce(guild, member, stats):
         f"-# <:emoji_39:1483249281237254326> `Reputation` : `{stats['reputation']}`"
     )
 
-    await ch.send(role.mention if role else None)
+    if role:
+        await ch.send(role.mention)
     await ch.send(msg)
 
 # ---------------------
-# FEATURED DAILY
+# FEATURED DAILY CHEF
 # ---------------------
 @tasks.loop(hours=24)
 async def featured():
     await bot.wait_until_ready()
     if not data["chefs"]:
         return
-
     guild = bot.guilds[0]
     cid = random.choice(list(data["chefs"].keys()))
     member = guild.get_member(int(cid))
-
     if member:
         await announce(guild, member, chef_stats(cid))
 
 # ---------------------
-# EVENT
+# REVIEW TRACKING
 # ---------------------
 @bot.event
 async def on_message(msg):
     if msg.author.bot:
         return
+    await bot.process_commands(msg)  # important!
+
     if msg.channel.name != REVIEW_CHANNEL:
         return
 
@@ -176,7 +180,10 @@ async def on_message(msg):
 
     for l in msg.content.splitlines():
         if "chef" in l.lower():
-            chef_id = int(''.join(filter(str.isdigit, l)))
+            try:
+                chef_id = int(''.join(filter(str.isdigit, l)))
+            except ValueError:
+                chef_id = None
         if "notes" in l.lower():
             parts = l.split(":")
             if len(parts) > 1:
@@ -212,23 +219,18 @@ async def on_message(msg):
     await msg.add_reaction("<:CC_Mascotlove:1479289149616947251>")
 
     # top chef trigger
-    if stats["average_rating"] >= 9:
-        c = data["chefs"][str(chef_id)]
-        if not c.get("announced"):
-            c["announced"] = True
-            save()
-            await announce(msg.guild, member, stats)
+    if stats["average_rating"] >= 9 and not stats.get("announced"):
+        stats["announced"] = True
+        data["chefs"][str(chef_id)] = stats
+        save()
+        await announce(msg.guild, member, stats)
 
 # ---------------------
-# COMMANDS
+# CHEF STATS COMMAND
 # ---------------------
-
-# ✧ CHEF STATS
 @bot.tree.command(name="chefstats")
 async def chefstats_cmd(interaction: discord.Interaction, chef: discord.Member):
-
     stats = chef_stats(chef.id)
-
     name = chef.display_name
     if stats["average_rating"] >= 9:
         name = f"✧･ﾟ: *✧･ﾟ:* {name} *:･ﾟ✧*:･ﾟ✧"
@@ -253,10 +255,11 @@ async def chefstats_cmd(interaction: discord.Interaction, chef: discord.Member):
 
     await interaction.response.send_message(embed=embed)
 
-# ✧ REVIEWS PROFILE
+# ---------------------
+# REVIEWS PROFILE COMMAND
+# ---------------------
 @bot.tree.command(name="reviews")
 async def reviews_cmd(interaction: discord.Interaction, user: discord.Member = None):
-
     target = user or interaction.user
     reviews = [r for r in data["reviews"] if r["user_id"] == target.id]
 
@@ -298,6 +301,6 @@ async def reviews_cmd(interaction: discord.Interaction, user: discord.Member = N
 async def on_ready():
     await bot.tree.sync()
     featured.start()
-    print(f"ready as {bot.user}")
+    print(f"Vanilla Vault Bot Ready as {bot.user}")
 
 bot.run(TOKEN)
